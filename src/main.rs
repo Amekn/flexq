@@ -26,7 +26,7 @@
 //! ```
 
 use clap::{ArgAction, Parser, ValueEnum};
-use qrcodegen::{QrCode, QrCodeEcc};
+use qrcodegen::{Mask, QrCode, QrCodeEcc, QrSegment, Version};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
@@ -74,8 +74,8 @@ struct Args {
     password: Option<String>,
 
     /// WiFi encryption type (default: wpa).
-    #[arg(long, requires = "wifi", default_value = "wpa")]
-    wifitype: String,
+    #[arg(long, requires = "wifi", value_enum, default_value = "wpa")]
+    wifitype: WifiType,
 
     // --- vCard mode ---
     /// Generate a vCard contact QR code.
@@ -108,15 +108,15 @@ struct Args {
 
     // --- Output format ---
     /// Output format (default: svg).
-    #[arg(long, default_value = "svg")]
-    format: String,
+    #[arg(long, value_enum, default_value = "svg")]
+    format: OutputFormat,
 
     /// Print QR code to terminal using Unicode block characters.
     #[arg(long, action = ArgAction::SetTrue)]
     term: bool,
 
     /// Fixed output size in pixels (default: module-based).
-    #[arg(long)]
+    #[arg(long, value_parser = parse_positive_i32)]
     size: Option<i32>,
 
     // --- Appearance ---
@@ -137,7 +137,7 @@ struct Args {
     dark_mode: bool,
 
     /// Border size in QR modules (default: 4).
-    #[arg(short = 'b', long, default_value = "4")]
+    #[arg(short = 'b', long, default_value = "4", value_parser = parse_non_negative_i32)]
     border: i32,
 
     /// Error correction level (default: M).
@@ -145,8 +145,8 @@ struct Args {
     ecc: String,
 
     /// Mask pattern 0–7 (default: auto).
-    #[arg(long)]
-    mask: Option<i32>,
+    #[arg(long, value_parser = parse_mask)]
+    mask: Option<u8>,
 
     /// Overlay a logo image in the center of the QR code.
     #[arg(long)]
@@ -165,6 +165,67 @@ enum ModuleShape {
     Rounded,
     Circle,
     Hexagon,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
+#[clap(rename_all = "kebab-case")]
+enum WifiType {
+    Wpa,
+    Wep,
+    None,
+}
+
+impl WifiType {
+    fn qr_type(self) -> &'static str {
+        match self {
+            Self::Wpa => "WPA",
+            Self::Wep => "WEP",
+            Self::None => "nopass",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
+#[clap(rename_all = "kebab-case")]
+enum OutputFormat {
+    Svg,
+    Png,
+}
+
+fn parse_positive_i32(value: &str) -> Result<i32, String> {
+    let value = value
+        .parse::<i32>()
+        .map_err(|_| format!("'{}' must be a whole number", value))?;
+
+    if value > 0 {
+        Ok(value)
+    } else {
+        Err("value must be greater than 0".to_string())
+    }
+}
+
+fn parse_non_negative_i32(value: &str) -> Result<i32, String> {
+    let value = value
+        .parse::<i32>()
+        .map_err(|_| format!("'{}' must be a whole number", value))?;
+
+    if value >= 0 {
+        Ok(value)
+    } else {
+        Err("value must be 0 or greater".to_string())
+    }
+}
+
+fn parse_mask(value: &str) -> Result<u8, String> {
+    let value = value
+        .parse::<u8>()
+        .map_err(|_| format!("'{}' must be a whole number from 0 to 7", value))?;
+
+    if value <= 7 {
+        Ok(value)
+    } else {
+        Err("mask must be between 0 and 7".to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +272,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     eprintln!("Generating QR code for {} bytes", text.len());
 
-    let qr = QrCode::encode_text(&text, ecc)?;
+    let qr = encode_qr(&text, ecc, args.mask)?;
 
     // Terminal preview
     if args.term {
@@ -225,8 +286,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output_path = args.output.clone();
 
     if args.stdout || output_path.is_some() {
-        match args.format.as_str() {
-            "png" => {
+        match args.format {
+            OutputFormat::Png => {
                 let png = qr_to_png(&qr, args.border, &fg_color, &bg_color, args.size)?;
                 if args.stdout {
                     io::stdout().write_all(&png)?;
@@ -235,7 +296,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     eprintln!("QR code saved to: {}", path);
                 }
             }
-            _ => {
+            OutputFormat::Svg => {
                 let svg = qr_to_svg(
                     &qr,
                     args.border,
@@ -308,18 +369,18 @@ fn run_batch(
             continue;
         }
 
-        match QrCode::encode_text(text, ecc) {
+        match encode_qr(text, ecc, args.mask) {
             Ok(qr) => {
                 if args.term {
                     render_terminal(&qr);
                 }
 
-                match args.format.as_str() {
-                    "png" => {
+                match args.format {
+                    OutputFormat::Png => {
                         let png = qr_to_png(&qr, args.border, fg_color, bg_color, args.size)?;
                         fs::write(output, &png)?;
                     }
-                    _ => {
+                    OutputFormat::Svg => {
                         let svg = qr_to_svg(
                             &qr,
                             args.border,
@@ -346,6 +407,20 @@ fn run_batch(
     Ok(())
 }
 
+fn encode_qr(text: &str, ecc: QrCodeEcc, mask: Option<u8>) -> Result<QrCode, Box<dyn Error>> {
+    let mask = mask.map(Mask::new);
+    let segments = QrSegment::make_segments(text);
+
+    Ok(QrCode::encode_segments_advanced(
+        &segments,
+        ecc,
+        Version::MIN,
+        Version::MAX,
+        mask,
+        true,
+    )?)
+}
+
 // ---------------------------------------------------------------------------
 // WiFi URI builder
 // ---------------------------------------------------------------------------
@@ -356,9 +431,27 @@ fn build_wifi_uri(args: &Args) -> Result<String, Box<dyn Error>> {
         .as_deref()
         .ok_or("--ssid is required with --wifi")?;
     let password = args.password.as_deref().unwrap_or("");
-    let r#type = args.wifitype.as_str();
+    let r#type = args.wifitype.qr_type();
 
-    Ok(format!("WIFI:T:{};S:{};P:{};;", r#type, ssid, password))
+    Ok(format!(
+        "WIFI:T:{};S:{};P:{};;",
+        r#type,
+        escape_wifi_field(ssid),
+        escape_wifi_field(password)
+    ))
+}
+
+fn escape_wifi_field(value: &str) -> String {
+    let mut escaped = String::new();
+
+    for ch in value.chars() {
+        if matches!(ch, '\\' | ';' | ',' | ':' | '"') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+
+    escaped
 }
 
 // ---------------------------------------------------------------------------
@@ -446,8 +539,8 @@ fn qr_to_svg(
     let version_comment = format!("<!-- generated by flexq {} -->", env!("CARGO_PKG_VERSION"));
 
     let mut svg = format!(
-        r#"{comment}
-<?xml version="1.0" encoding="UTF-8"?>
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+{comment}
 <svg xmlns="http://www.w3.org/2000/svg"
  viewBox="0 0 {svg_size} {svg_size}"
  width="{svg_size}" height="{svg_size}"
@@ -477,7 +570,7 @@ fn qr_to_svg(
 
     // Logo overlay
     if let Some(logo) = logo_path {
-        svg.push_str(&build_logo_overlay(qr, border, scale, logo));
+        svg.push_str(&build_logo_overlay(qr, border, scale, logo, bg_color));
     }
 
     svg.push_str("</svg>\n");
@@ -581,7 +674,13 @@ fn build_hexagon_path(qr: &QrCode, border: i32, scale: f64, fg_color: &str) -> S
 }
 
 /// Logo overlay — carves out a center region and embeds the logo as an image.
-fn build_logo_overlay(qr: &QrCode, border: i32, scale: f64, logo_path: &str) -> String {
+fn build_logo_overlay(
+    qr: &QrCode,
+    border: i32,
+    scale: f64,
+    logo_path: &str,
+    bg_color: &str,
+) -> String {
     let module_size = qr.size();
 
     // Logo region: center 25% of the module area (not including border)
@@ -621,11 +720,12 @@ fn build_logo_overlay(qr: &QrCode, border: i32, scale: f64, logo_path: &str) -> 
     };
 
     format!(
-        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#FFFFFF\" rx=\"{}\"/>\n<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" href=\"{}\"/>\n",
+        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\" rx=\"{}\"/>\n<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" href=\"{}\"/>\n",
         logo_x - quiet,
         logo_y - quiet,
         logo_w + quiet * 2.0,
         logo_h + quiet * 2.0,
+        bg_color,
         scale,
         logo_x,
         logo_y,
@@ -680,8 +780,7 @@ fn qr_to_png(
     let module_size = qr.size();
     let dimension = module_size + 2 * border;
     let png_size = fixed_size.unwrap_or(dimension);
-    let module_px = (png_size as f64 / dimension as f64).ceil() as u32;
-    let actual_size = dimension as u32 * module_px;
+    let actual_size = u32::try_from(png_size)?;
 
     let mut img = image::ImageBuffer::new(actual_size, actual_size);
     let bg = parse_rgb(bg_color)?;
@@ -692,21 +791,16 @@ fn qr_to_png(
         *pixel = image::Rgb(bg);
     }
 
-    // Draw modules
-    for y in 0..module_size {
-        for x in 0..module_size {
-            if qr.get_module(x, y) {
-                let px = (x + border) as u32 * module_px;
-                let py = (y + border) as u32 * module_px;
-                for dy in 0..module_px {
-                    for dx in 0..module_px {
-                        let sx = px + dx;
-                        let sy = py + dy;
-                        if sx < actual_size && sy < actual_size {
-                            img.put_pixel(sx, sy, image::Rgb(fg));
-                        }
-                    }
-                }
+    // Map output pixels back to QR modules so --size is the exact PNG dimension.
+    for y in 0..actual_size {
+        let module_y =
+            ((i64::from(y) * i64::from(dimension)) / i64::from(actual_size)) as i32 - border;
+        for x in 0..actual_size {
+            let module_x =
+                ((i64::from(x) * i64::from(dimension)) / i64::from(actual_size)) as i32 - border;
+
+            if qr.get_module(module_x, module_y) {
+                img.put_pixel(x, y, image::Rgb(fg));
             }
         }
     }
@@ -844,6 +938,34 @@ mod tests {
         assert!(parse_ecc("low").is_err());
     }
 
+    // --- CLI validation ---
+
+    #[test]
+    fn cli_rejects_invalid_output_format() {
+        assert!(Args::try_parse_from(["flexq", "text", "--format", "pdf"]).is_err());
+    }
+
+    #[test]
+    fn cli_rejects_invalid_wifi_type() {
+        assert!(
+            Args::try_parse_from(["flexq", "--wifi", "--ssid", "Cafe", "--wifitype", "bogus"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cli_rejects_invalid_numeric_options() {
+        assert!(Args::try_parse_from(["flexq", "text", "--border=-1"]).is_err());
+        assert!(Args::try_parse_from(["flexq", "text", "--size=0"]).is_err());
+        assert!(Args::try_parse_from(["flexq", "text", "--mask=8"]).is_err());
+    }
+
+    #[test]
+    fn encode_qr_uses_requested_mask() {
+        let qr = encode_qr("test", QrCodeEcc::Medium, Some(3)).unwrap();
+        assert_eq!(qr.mask().value(), 3);
+    }
+
     // --- WiFi URI ---
 
     #[test]
@@ -852,7 +974,7 @@ mod tests {
             wifi: true,
             ssid: Some("Home".to_string()),
             password: Some("secret".to_string()),
-            wifitype: "wpa".to_string(),
+            wifitype: WifiType::Wpa,
             vcard: false,
             batch: None,
             text: String::new(),
@@ -866,7 +988,7 @@ mod tests {
             org: None,
             title: None,
             url: None,
-            format: "svg".to_string(),
+            format: OutputFormat::Svg,
             term: false,
             size: None,
             shape: ModuleShape::Square,
@@ -879,7 +1001,7 @@ mod tests {
             logo: None,
         };
         let uri = build_wifi_uri(&args).unwrap();
-        assert_eq!(uri, "WIFI:T:wpa;S:Home;P:secret;;");
+        assert_eq!(uri, "WIFI:T:WPA;S:Home;P:secret;;");
     }
 
     #[test]
@@ -888,7 +1010,7 @@ mod tests {
             wifi: true,
             ssid: Some("Net".to_string()),
             password: Some("pwd".to_string()),
-            wifitype: "wep".to_string(),
+            wifitype: WifiType::Wep,
             vcard: false,
             batch: None,
             text: String::new(),
@@ -902,7 +1024,7 @@ mod tests {
             org: None,
             title: None,
             url: None,
-            format: "svg".to_string(),
+            format: OutputFormat::Svg,
             term: false,
             size: None,
             shape: ModuleShape::Square,
@@ -915,16 +1037,16 @@ mod tests {
             logo: None,
         };
         let uri = build_wifi_uri(&args).unwrap();
-        assert_eq!(uri, "WIFI:T:wep;S:Net;P:pwd;;");
+        assert_eq!(uri, "WIFI:T:WEP;S:Net;P:pwd;;");
     }
 
     #[test]
-    fn build_wifi_uri_missing_ssid() {
+    fn build_wifi_uri_open_network() {
         let args = Args {
             wifi: true,
-            ssid: None,
-            password: Some("x".to_string()),
-            wifitype: "wpa".to_string(),
+            ssid: Some("Cafe".to_string()),
+            password: None,
+            wifitype: WifiType::None,
             vcard: false,
             batch: None,
             text: String::new(),
@@ -938,7 +1060,82 @@ mod tests {
             org: None,
             title: None,
             url: None,
-            format: "svg".to_string(),
+            format: OutputFormat::Svg,
+            term: false,
+            size: None,
+            shape: ModuleShape::Square,
+            fg_color: "#000000".to_string(),
+            bg_color: "#FFFFFF".to_string(),
+            dark_mode: false,
+            border: 4,
+            ecc: "M".to_string(),
+            mask: None,
+            logo: None,
+        };
+        let uri = build_wifi_uri(&args).unwrap();
+        assert_eq!(uri, "WIFI:T:nopass;S:Cafe;P:;;");
+    }
+
+    #[test]
+    fn build_wifi_uri_escapes_reserved_characters() {
+        let args = Args {
+            wifi: true,
+            ssid: Some(r#"Cafe;Floor:2, "Guest""#.to_string()),
+            password: Some(r#"pa\ss;word"#.to_string()),
+            wifitype: WifiType::Wpa,
+            vcard: false,
+            batch: None,
+            text: String::new(),
+            output: None,
+            stdin: false,
+            stdout: false,
+            source_file: None,
+            name: None,
+            phone: None,
+            email: None,
+            org: None,
+            title: None,
+            url: None,
+            format: OutputFormat::Svg,
+            term: false,
+            size: None,
+            shape: ModuleShape::Square,
+            fg_color: "#000000".to_string(),
+            bg_color: "#FFFFFF".to_string(),
+            dark_mode: false,
+            border: 4,
+            ecc: "M".to_string(),
+            mask: None,
+            logo: None,
+        };
+        let uri = build_wifi_uri(&args).unwrap();
+        assert_eq!(
+            uri,
+            r#"WIFI:T:WPA;S:Cafe\;Floor\:2\, \"Guest\";P:pa\\ss\;word;;"#
+        );
+    }
+
+    #[test]
+    fn build_wifi_uri_missing_ssid() {
+        let args = Args {
+            wifi: true,
+            ssid: None,
+            password: Some("x".to_string()),
+            wifitype: WifiType::Wpa,
+            vcard: false,
+            batch: None,
+            text: String::new(),
+            output: None,
+            stdin: false,
+            stdout: false,
+            source_file: None,
+            name: None,
+            phone: None,
+            email: None,
+            org: None,
+            title: None,
+            url: None,
+            format: OutputFormat::Svg,
             term: false,
             size: None,
             shape: ModuleShape::Square,
@@ -968,14 +1165,14 @@ mod tests {
             wifi: false,
             ssid: None,
             password: None,
-            wifitype: "wpa".to_string(),
+            wifitype: WifiType::Wpa,
             batch: None,
             text: String::new(),
             output: None,
             stdin: false,
             stdout: false,
             source_file: None,
-            format: "svg".to_string(),
+            format: OutputFormat::Svg,
             term: false,
             size: None,
             shape: ModuleShape::Square,
@@ -1008,14 +1205,14 @@ mod tests {
             wifi: false,
             ssid: None,
             password: None,
-            wifitype: "wpa".to_string(),
+            wifitype: WifiType::Wpa,
             batch: None,
             text: String::new(),
             output: None,
             stdin: false,
             stdout: false,
             source_file: None,
-            format: "svg".to_string(),
+            format: OutputFormat::Svg,
             term: false,
             size: None,
             shape: ModuleShape::Square,
@@ -1047,6 +1244,7 @@ mod tests {
             None,
             &None,
         );
+        assert!(svg.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
         assert!(svg.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
     }
 
@@ -1084,7 +1282,7 @@ mod tests {
     #[test]
     fn qr_to_svg_border_affects_viewbox() {
         let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
-        let size = qr.size() as i32;
+        let size = qr.size();
 
         let svg_b0 = qr_to_svg(&qr, 0, "#000", "#FFF", &ModuleShape::Square, None, &None);
         assert!(svg_b0.contains(&format!(r#"viewBox="0 0 {} {}""#, size, size)));
@@ -1168,8 +1366,11 @@ mod tests {
     #[test]
     fn qr_to_png_fixed_size() {
         let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
-        let _png = qr_to_png(&qr, 4, "#000", "#FFF", Some(400)).unwrap();
-        // Should produce a valid PNG without panicking
+        let png = qr_to_png(&qr, 4, "#000", "#FFF", Some(400)).unwrap();
+        let img = image::load_from_memory(&png).unwrap();
+
+        assert_eq!(img.width(), 400);
+        assert_eq!(img.height(), 400);
     }
 
     // --- RGB parsing ---
