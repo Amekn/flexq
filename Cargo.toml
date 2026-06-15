@@ -1,15 +1,17 @@
 [package]
 name = "flexq"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
-description = "A minimal command-line QR code generator that outputs SVG files"
+description = "A flexible command-line QR code generator with SVG, PNG, WiFi, and vCard support"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Amekn/flexq"
 homepage = "https://github.com/Amekn/flexq"
 readme = "README.md"
-keywords = ["qr-code", "qrcode", "svg", "command-line", "generator"]
+keywords = ["qr-code", "qrcode", "svg", "png", "generator"]
 categories = ["command-line-utilities", "graphics"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 qrcodegen = "1.8.0"
+image = "0.25"
+csv = "1.3"

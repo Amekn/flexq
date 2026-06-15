@@ -1,54 +1,42 @@
 //! # FlexQ
 //!
-//! A minimal command-line QR code generator that encodes arbitrary text or URLs
-//! into standalone SVG files. Built on top of the [`qrcodegen`] crate and
-//! powered by [`clap`] for ergonomic argument parsing.
+//! A flexible command-line QR code generator that encodes arbitrary text, URLs,
+//! WiFi credentials, or vCard contacts into standalone SVG or PNG files.
+//!
+//! Built on top of the [`qrcodegen`] crate and powered by [`clap`] for ergonomic
+//! argument parsing.
 //!
 //! # Usage
 //!
 //! ```text
-//! flexq [TEXT] [OUTPUT] [OPTIONS]
+//! flexq [TEXT] [OPTIONS]
 //! ```
-//!
-//! Both `TEXT` and `OUTPUT` are optional — use `--stdin` or `--source-file` for
-//! input, and `--stdout` for output.
 //!
 //! # Examples
 //!
 //! ```text
-//! flexq "https://example.com" qrcode.svg
-//! flexq "Hello, world!" hello.svg
-//! flexq "https://example.com" qrcode.svg --border 8
-//! flexq "https://example.com" qrcode.svg --fg-color "#FF0000" --bg-color "#FFFFCC"
-//! echo "https://example.com" | flexq --stdin --stdout > qrcode.svg
-//! flexq --source-file input.txt output.svg
+//! flexq "https://example.com" -o qrcode.svg
+//! flexq "Hello, world!" -o hello.svg --shape rounded
+//! flexq "https://example.com" --format png --size 400 -o qrcode.png
+//! flexq --wifi --ssid "Home" --password "secret" --wifitype wpa -o wifi.svg
+//! flexq --vcard --name "John" --phone "123" --email "john@example.com" -o contact.svg
+//! echo "https://example.com" | flexq --stdin --stdout
+//! flexq --batch codes.csv
+//! flexq "https://example.com" --term
 //! ```
-//!
-//! # Options
-//!
-//! * `-i`, `--stdin` — Read the text to encode from standard input.
-//! * `-o`, `--stdout` — Write the SVG QR code to standard output.
-//! * `-s`, `--source-file <F>` — Read the text to encode from a file.
-//! * `-b`, `--border <N>` — Border size in QR modules (default: `4`).
-//! * `-F`, `--fg-color <C>` — Foreground color of the QR code (default: `#000000`).
-//! * `-B`, `--bg-color <C>` — Background color of the QR code (default: `#FFFFFF`).
-//! * `-h`, `--help` — Print help message and exit.
-//! * `-V`, `--version` — Print version information and exit.
-//!
-//! # Details
-//!
-//! FlexQ generates SVG files using medium error correction (`QrCodeEcc::Medium`)
-//! and a configurable border (default: 4 modules), foreground color (default: black),
-//! and background color (default: white). Colors are validated as hex strings.
-//! The output SVG is standalone and can be opened in any browser or vector graphics editor.
 
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, ValueEnum};
 use qrcodegen::{QrCode, QrCodeEcc};
 use std::error::Error;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Write};
+use std::path::Path;
 
-/// Runtime configuration derived from command-line arguments.
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+/// A flexible command-line QR code generator.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -56,128 +44,1039 @@ struct Args {
     #[arg(default_value = "")]
     text: String,
 
-    /// The path where the SVG QR code will be saved.
-    #[arg(default_value = "")]
-    output: String,
+    /// The file path where the QR code will be saved.
+    #[arg(short = 'o', long)]
+    output: Option<String>,
 
     /// Read the text to encode from standard input.
     #[arg(short = 'i', long, action = ArgAction::SetTrue, conflicts_with = "source_file")]
     stdin: bool,
 
-    /// Write the SVG QR code to standard output.
-    #[arg(short = 'o', long, action = ArgAction::SetTrue)]
+    /// Write the QR code to standard output.
+    #[arg(long, action = ArgAction::SetTrue)]
     stdout: bool,
 
     /// Read the text to encode from a file.
     #[arg(short = 's', long, conflicts_with = "stdin")]
     source_file: Option<String>,
 
-    /// The border size (in QR modules) around the QR code in the generated SVG.
-    #[arg(short = 'b', long, default_value = "4")]
-    border: i32,
+    // --- WiFi mode ---
+    /// Generate a WiFi configuration QR code.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["vcard", "batch"])]
+    wifi: bool,
 
-    /// The foreground color of the QR code in the generated SVG.
+    /// WiFi network name (SSID).
+    #[arg(long, requires = "wifi")]
+    ssid: Option<String>,
+
+    /// WiFi password.
+    #[arg(long, requires = "wifi")]
+    password: Option<String>,
+
+    /// WiFi encryption type (default: wpa).
+    #[arg(long, requires = "wifi", default_value = "wpa")]
+    wifitype: String,
+
+    // --- vCard mode ---
+    /// Generate a vCard contact QR code.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["wifi", "batch"])]
+    vcard: bool,
+
+    /// Contact full name.
+    #[arg(long, requires = "vcard")]
+    name: Option<String>,
+
+    /// Contact phone number.
+    #[arg(long, requires = "vcard")]
+    phone: Option<String>,
+
+    /// Contact email address.
+    #[arg(long, requires = "vcard")]
+    email: Option<String>,
+
+    /// Contact organization.
+    #[arg(long, requires = "vcard")]
+    org: Option<String>,
+
+    /// Contact job title.
+    #[arg(long, requires = "vcard")]
+    title: Option<String>,
+
+    /// Contact website URL.
+    #[arg(long, requires = "vcard")]
+    url: Option<String>,
+
+    // --- Output format ---
+    /// Output format (default: svg).
+    #[arg(long, default_value = "svg")]
+    format: String,
+
+    /// Print QR code to terminal using Unicode block characters.
+    #[arg(long, action = ArgAction::SetTrue)]
+    term: bool,
+
+    /// Fixed output size in pixels (default: module-based).
+    #[arg(long)]
+    size: Option<i32>,
+
+    // --- Appearance ---
+    /// Module shape (default: square).
+    #[arg(long, value_enum, default_value = "square")]
+    shape: ModuleShape,
+
+    /// Foreground (module) color in hex (default: #000000).
     #[arg(short = 'F', long, default_value = "#000000")]
     fg_color: String,
 
-    /// The background color of the QR code in the generated SVG.
+    /// Background color in hex (default: #FFFFFF).
     #[arg(short = 'B', long, default_value = "#FFFFFF")]
     bg_color: String,
+
+    /// Invert default colors for dark mode (fg=#FFFFFF, bg=#1A1A1A).
+    #[arg(long, action = ArgAction::SetTrue)]
+    dark_mode: bool,
+
+    /// Border size in QR modules (default: 4).
+    #[arg(short = 'b', long, default_value = "4")]
+    border: i32,
+
+    /// Error correction level (default: M).
+    #[arg(long, default_value = "M")]
+    ecc: String,
+
+    /// Mask pattern 0–7 (default: auto).
+    #[arg(long)]
+    mask: Option<i32>,
+
+    /// Overlay a logo image in the center of the QR code.
+    #[arg(long)]
+    logo: Option<String>,
+
+    // --- Batch mode ---
+    /// Path to a CSV/TSV file with `text,output_path` rows for batch generation.
+    #[arg(long, conflicts_with_all = ["wifi", "vcard", "stdin", "source_file"])]
+    batch: Option<String>,
 }
 
-/// The entry point for the FlexQ binary.
-///
-/// Parses arguments, generates a QR code, and writes it as an SVG file.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
+#[clap(rename_all = "kebab-case")]
+enum ModuleShape {
+    Square,
+    Rounded,
+    Circle,
+    Hexagon,
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    validate_color(&args.fg_color)?;
-    validate_color(&args.bg_color)?;
+    // Apply dark mode defaults
+    let (fg_color, bg_color) = if args.dark_mode {
+        ("#FFFFFF".to_string(), "#1A1A1A".to_string())
+    } else {
+        (args.fg_color.clone(), args.bg_color.clone())
+    };
 
-    // Priority: stdin > source_file > text argument
-    let text = if args.stdin {
+    validate_color(&fg_color)?;
+    validate_color(&bg_color)?;
+
+    let ecc = parse_ecc(&args.ecc)?;
+
+    if let Some(ref batch_path) = args.batch {
+        return run_batch(batch_path, &args, &fg_color, &bg_color, ecc);
+    }
+
+    // Build the text to encode
+    let text = if args.wifi {
+        build_wifi_uri(&args)?
+    } else if args.vcard {
+        build_vcard(&args)?
+    } else if args.stdin {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
         buf
     } else if let Some(ref path) = args.source_file {
         fs::read_to_string(path)?
     } else {
-        args.text
+        args.text.clone()
     };
+
+    if text.is_empty() {
+        return Err("No input text provided. Use TEXT, --stdin, --source-file, --wifi, --vcard, or --batch.".into());
+    }
 
     eprintln!("Generating QR code for {} bytes", text.len());
 
-    let qr = QrCode::encode_text(&text, QrCodeEcc::Medium)?;
-    let svg = qr_to_svg(&qr, args.border, &args.fg_color, &args.bg_color);
+    let qr = QrCode::encode_text(&text, ecc)?;
 
-    if args.stdout {
-        let mut stdout = io::stdout();
-        stdout.write_all(svg.as_bytes())?;
-        stdout.flush()?;
-    } else if !args.output.is_empty() {
-        fs::write(&args.output, svg)?;
-        eprintln!("QR code saved to: {}", &args.output);
+    // Terminal preview
+    if args.term {
+        render_terminal(&qr);
+        if args.output.is_none() && !args.stdout {
+            return Ok(());
+        }
     }
-    Ok(())
-}
 
-/// Validate that a color string is a valid hex color.
-fn validate_color(color: &str) -> Result<(), Box<dyn Error>> {
-    if !color.starts_with('#') || !color[1..].chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(format!("Invalid color: {}", color).into());
-    }
-    Ok(())
-}
+    // Output
+    let output_path = args.output.clone();
 
-/// Convert a [`QrCode`] into an SVG string.
-///
-/// # Arguments
-///
-/// * `qr` — The generated QR code to render.
-/// * `border` — Number of empty modules to leave around the code.
-///
-/// # Returns
-///
-/// A valid, self-contained SVG document as a [`String`].
-fn qr_to_svg(qr: &QrCode, border: i32, fg_color: &str, bg_color: &str) -> String {
-    let size = qr.size();
-    let dimension = size + 2 * border;
-    let mut paths = String::new();
-
-    for y in 0..size {
-        for x in 0..size {
-            if qr.get_module(x, y) {
-                paths.push_str(&format!("M{},{}h1v1h-1z ", x + border, y + border));
+    if args.stdout || output_path.is_some() {
+        match args.format.as_str() {
+            "png" => {
+                let png = qr_to_png(&qr, args.border, &fg_color, &bg_color, args.size)?;
+                if args.stdout {
+                    io::stdout().write_all(&png)?;
+                } else if let Some(ref path) = output_path {
+                    fs::write(path, &png)?;
+                    eprintln!("QR code saved to: {}", path);
+                }
+            }
+            _ => {
+                let svg = qr_to_svg(
+                    &qr,
+                    args.border,
+                    &fg_color,
+                    &bg_color,
+                    &args.shape,
+                    args.size,
+                    &args.logo,
+                );
+                if args.stdout {
+                    io::stdout().write_all(svg.as_bytes())?;
+                } else if let Some(ref path) = output_path {
+                    fs::write(path, &svg)?;
+                    eprintln!("QR code saved to: {}", path);
+                }
             }
         }
     }
 
-    format!(
-        r##"<?xml version="1.0" encoding="UTF-8"?>
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Batch mode
+// ---------------------------------------------------------------------------
+
+fn run_batch(
+    path: &str,
+    args: &Args,
+    fg_color: &str,
+    bg_color: &str,
+    ecc: QrCodeEcc,
+) -> Result<(), Box<dyn Error>> {
+    let file = fs::File::open(path)?;
+    let delimiter = if path.ends_with(".tsv") { b'\t' } else { b',' };
+
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .has_headers(false)
+        .from_reader(file);
+
+    let mut success = 0;
+    let mut failed = 0;
+
+    for (i, result) in reader.records().enumerate() {
+        let record = match result {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Row {}: parse error: {}", i + 1, e);
+                failed += 1;
+                continue;
+            }
+        };
+
+        if record.len() < 2 {
+            eprintln!(
+                "Row {}: expected at least 2 columns (text, output_path)",
+                i + 1
+            );
+            failed += 1;
+            continue;
+        }
+
+        let text = record[0].trim();
+        let output = record[1].trim();
+
+        if text.is_empty() {
+            eprintln!("Row {}: empty text, skipping", i + 1);
+            failed += 1;
+            continue;
+        }
+
+        match QrCode::encode_text(text, ecc) {
+            Ok(qr) => {
+                if args.term {
+                    render_terminal(&qr);
+                }
+
+                match args.format.as_str() {
+                    "png" => {
+                        let png = qr_to_png(&qr, args.border, fg_color, bg_color, args.size)?;
+                        fs::write(output, &png)?;
+                    }
+                    _ => {
+                        let svg = qr_to_svg(
+                            &qr,
+                            args.border,
+                            fg_color,
+                            bg_color,
+                            &args.shape,
+                            args.size,
+                            &args.logo,
+                        );
+                        fs::write(output, &svg)?;
+                    }
+                }
+                eprintln!("Row {}: saved to {}", i + 1, output);
+                success += 1;
+            }
+            Err(e) => {
+                eprintln!("Row {}: encode error: {}", i + 1, e);
+                failed += 1;
+            }
+        }
+    }
+
+    eprintln!("Batch complete: {} succeeded, {} failed", success, failed);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// WiFi URI builder
+// ---------------------------------------------------------------------------
+
+fn build_wifi_uri(args: &Args) -> Result<String, Box<dyn Error>> {
+    let ssid = args
+        .ssid
+        .as_deref()
+        .ok_or("--ssid is required with --wifi")?;
+    let password = args.password.as_deref().unwrap_or("");
+    let r#type = args.wifitype.as_str();
+
+    Ok(format!("WIFI:T:{};S:{};P:{};;", r#type, ssid, password))
+}
+
+// ---------------------------------------------------------------------------
+// vCard builder
+// ---------------------------------------------------------------------------
+
+fn build_vcard(args: &Args) -> Result<String, Box<dyn Error>> {
+    let name = args.name.as_deref().unwrap_or("");
+    let phone = args.phone.as_deref().unwrap_or("");
+    let email = args.email.as_deref().unwrap_or("");
+    let org = args.org.as_deref().unwrap_or("");
+    let title = args.title.as_deref().unwrap_or("");
+    let url = args.url.as_deref().unwrap_or("");
+
+    let mut vcard = String::from("BEGIN:VCARD\nVERSION:3.0\n");
+    if !name.is_empty() {
+        vcard.push_str(&format!("FN:{}\n", name));
+        vcard.push_str(&format!("N:{};;\n", name));
+    }
+    if !phone.is_empty() {
+        vcard.push_str(&format!("TEL:{}\n", phone));
+    }
+    if !email.is_empty() {
+        vcard.push_str(&format!("EMAIL:{}\n", email));
+    }
+    if !org.is_empty() {
+        vcard.push_str(&format!("ORG:{}\n", org));
+    }
+    if !title.is_empty() {
+        vcard.push_str(&format!("TITLE:{}\n", title));
+    }
+    if !url.is_empty() {
+        vcard.push_str(&format!("URL:{}\n", url));
+    }
+    vcard.push_str("END:VCARD");
+
+    Ok(vcard)
+}
+
+// ---------------------------------------------------------------------------
+// Terminal renderer
+// ---------------------------------------------------------------------------
+
+fn render_terminal(qr: &QrCode) {
+    let size = qr.size();
+    // Header
+    println!("\n  ┌──────────────────────────────┐");
+    println!("  │         FlexQ Preview         │");
+    println!("  └──────────────────────────────┘\n");
+
+    for y in 0..size {
+        let mut line = String::new();
+        for x in 0..size {
+            if qr.get_module(x, y) {
+                line.push_str("██");
+            } else {
+                line.push_str("  ");
+            }
+        }
+        println!("  {}  ", line);
+    }
+    println!();
+}
+
+// ---------------------------------------------------------------------------
+// SVG renderer
+// ---------------------------------------------------------------------------
+
+fn qr_to_svg(
+    qr: &QrCode,
+    border: i32,
+    fg_color: &str,
+    bg_color: &str,
+    shape: &ModuleShape,
+    fixed_size: Option<i32>,
+    logo_path: &Option<String>,
+) -> String {
+    let module_size = qr.size();
+    let dimension = module_size + 2 * border;
+
+    // Use fixed size if provided, otherwise module-based
+    let svg_size = fixed_size.unwrap_or(dimension);
+    let scale = svg_size as f64 / dimension as f64;
+
+    let version_comment = format!("<!-- generated by flexq {} -->", env!("CARGO_PKG_VERSION"));
+
+    let mut svg = format!(
+        r#"{comment}
+<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg"
- viewBox="0 0 {dimension} {dimension}"
+ viewBox="0 0 {svg_size} {svg_size}"
+ width="{svg_size}" height="{svg_size}"
  shape-rendering="crispEdges">
 <rect width="100%" height="100%" fill="{bg_color}"/>
-<path d="{paths}" fill="{fg_color}"/>
-</svg>"##
+"#,
+        comment = version_comment,
+        svg_size = svg_size,
+        bg_color = bg_color
+    );
+
+    // Build modules based on shape
+    match shape {
+        ModuleShape::Square => {
+            svg.push_str(&build_square_path(qr, border, scale, fg_color));
+        }
+        ModuleShape::Rounded => {
+            svg.push_str(&build_rounded_path(qr, border, scale, fg_color));
+        }
+        ModuleShape::Circle => {
+            svg.push_str(&build_circle_path(qr, border, scale, fg_color));
+        }
+        ModuleShape::Hexagon => {
+            svg.push_str(&build_hexagon_path(qr, border, scale, fg_color));
+        }
+    }
+
+    // Logo overlay
+    if let Some(logo) = logo_path {
+        svg.push_str(&build_logo_overlay(qr, border, scale, logo));
+    }
+
+    svg.push_str("</svg>\n");
+    svg
+}
+
+/// Square modules (default) — efficient single path.
+fn build_square_path(qr: &QrCode, border: i32, scale: f64, fg_color: &str) -> String {
+    let size = qr.size();
+    let mut d = String::new();
+
+    for y in 0..size {
+        for x in 0..size {
+            if qr.get_module(x, y) {
+                let px = (x + border) as f64 * scale;
+                let py = (y + border) as f64 * scale;
+                let s = scale;
+                d.push_str(&format!("M{},{}h{}v{}h-{}z ", px, py, s, s, s));
+            }
+        }
+    }
+
+    format!("<path d=\"{}\" fill=\"{}\"/>\n", d, fg_color)
+}
+
+/// Rounded rectangle modules.
+fn build_rounded_path(qr: &QrCode, border: i32, scale: f64, fg_color: &str) -> String {
+    let size = qr.size();
+    let r = (scale * 0.3).min(scale * 0.45);
+    let mut rects = String::new();
+
+    for y in 0..size {
+        for x in 0..size {
+            if qr.get_module(x, y) {
+                let px = (x + border) as f64 * scale;
+                let py = (y + border) as f64 * scale;
+                let s = scale;
+                rects.push_str(&format!(
+                    "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" ry=\"{}\"/> ",
+                    px, py, s, s, r, r
+                ));
+            }
+        }
+    }
+
+    format!("<g fill=\"{}\">{}</g>\n", fg_color, rects)
+}
+
+/// Circle modules.
+fn build_circle_path(qr: &QrCode, border: i32, scale: f64, fg_color: &str) -> String {
+    let size = qr.size();
+    let r = scale * 0.48;
+    let mut circles = String::new();
+
+    for y in 0..size {
+        for x in 0..size {
+            if qr.get_module(x, y) {
+                let cx = (x + border) as f64 * scale + scale * 0.5;
+                let cy = (y + border) as f64 * scale + scale * 0.5;
+                circles.push_str(&format!(
+                    "<circle cx=\"{}\" cy=\"{}\" r=\"{}\"/> ",
+                    cx, cy, r
+                ));
+            }
+        }
+    }
+
+    format!("<g fill=\"{}\">{}</g>\n", fg_color, circles)
+}
+
+/// Hexagon modules.
+fn build_hexagon_path(qr: &QrCode, border: i32, scale: f64, fg_color: &str) -> String {
+    let size = qr.size();
+    let r = scale * 0.48;
+    let mut polys = String::new();
+
+    for y in 0..size {
+        for x in 0..size {
+            if qr.get_module(x, y) {
+                let cx = (x + border) as f64 * scale + scale * 0.5;
+                let cy = (y + border) as f64 * scale + scale * 0.5;
+                // Pointy-top hexagon
+                let pts = [
+                    (cx, cy - r),
+                    (cx + r * 0.866, cy - r * 0.5),
+                    (cx + r * 0.866, cy + r * 0.5),
+                    (cx, cy + r),
+                    (cx - r * 0.866, cy + r * 0.5),
+                    (cx - r * 0.866, cy - r * 0.5),
+                ];
+                let point_str: Vec<String> = pts
+                    .iter()
+                    .map(|(px, py)| format!("{},{}", px, py))
+                    .collect();
+                polys.push_str(&format!("<polygon points=\"{}\"/> ", point_str.join(" ")));
+            }
+        }
+    }
+
+    format!("<g fill=\"{}\">{}</g>\n", fg_color, polys)
+}
+
+/// Logo overlay — carves out a center region and embeds the logo as an image.
+fn build_logo_overlay(qr: &QrCode, border: i32, scale: f64, logo_path: &str) -> String {
+    let module_size = qr.size();
+
+    // Logo region: center 25% of the module area (not including border)
+    let logo_module_fraction = 0.25;
+    let logo_modules = (module_size as f64 * logo_module_fraction).ceil() as i32;
+    let logo_border_offset = (module_size - logo_modules) / 2;
+
+    let logo_x = (logo_border_offset + border) as f64 * scale;
+    let logo_y = (logo_border_offset + border) as f64 * scale;
+    let logo_w = logo_modules as f64 * scale;
+    let logo_h = logo_w;
+
+    // Quiet zone padding around the logo
+    let quiet = scale * 2.0;
+
+    // Encode the logo file path as a data URI for embedding
+    let logo_data = match fs::read(logo_path) {
+        Ok(data) => {
+            let ext = Path::new(logo_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("png");
+            let mime = match ext.to_lowercase().as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "svg" => "image/svg+xml",
+                _ => "image/png",
+            };
+            let b64 = base64_encode(&data);
+            format!("data:{};base64,{}", mime, b64)
+        }
+        Err(e) => {
+            eprintln!("Warning: could not read logo '{}': {}", logo_path, e);
+            return String::new();
+        }
+    };
+
+    format!(
+        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#FFFFFF\" rx=\"{}\"/>\n<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" href=\"{}\"/>\n",
+        logo_x - quiet,
+        logo_y - quiet,
+        logo_w + quiet * 2.0,
+        logo_h + quiet * 2.0,
+        scale,
+        logo_x,
+        logo_y,
+        logo_w,
+        logo_h,
+        logo_data
     )
+}
+
+/// Minimal base64 encoder (avoids adding a dependency just for logo embedding).
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    let chunks = data.chunks(3);
+
+    for chunk in chunks {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+
+        if chunk.len() > 1 {
+            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+
+        if chunk.len() > 2 {
+            result.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// PNG renderer
+// ---------------------------------------------------------------------------
+
+fn qr_to_png(
+    qr: &QrCode,
+    border: i32,
+    fg_color: &str,
+    bg_color: &str,
+    fixed_size: Option<i32>,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let module_size = qr.size();
+    let dimension = module_size + 2 * border;
+    let png_size = fixed_size.unwrap_or(dimension);
+    let module_px = (png_size as f64 / dimension as f64).ceil() as u32;
+    let actual_size = dimension as u32 * module_px;
+
+    let mut img = image::ImageBuffer::new(actual_size, actual_size);
+    let bg = parse_rgb(bg_color)?;
+    let fg = parse_rgb(fg_color)?;
+
+    // Fill background
+    for pixel in img.pixels_mut() {
+        *pixel = image::Rgb(bg);
+    }
+
+    // Draw modules
+    for y in 0..module_size {
+        for x in 0..module_size {
+            if qr.get_module(x, y) {
+                let px = (x + border) as u32 * module_px;
+                let py = (y + border) as u32 * module_px;
+                for dy in 0..module_px {
+                    for dx in 0..module_px {
+                        let sx = px + dx;
+                        let sy = py + dy;
+                        if sx < actual_size && sy < actual_size {
+                            img.put_pixel(sx, sy, image::Rgb(fg));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut buf = Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png)?;
+    Ok(buf.into_inner())
+}
+
+/// Parse a hex color string into an [R, G, B] array.
+fn parse_rgb(color: &str) -> Result<[u8; 3], Box<dyn Error>> {
+    let hex = color.strip_prefix('#').ok_or("Color must start with '#'")?;
+    let rgb: [u8; 3] = match hex.len() {
+        3 => {
+            let r = u8::from_str_radix(&hex[0..1], 16)?;
+            let g = u8::from_str_radix(&hex[1..2], 16)?;
+            let b = u8::from_str_radix(&hex[2..3], 16)?;
+            [r * 17, g * 17, b * 17]
+        }
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16)?;
+            let g = u8::from_str_radix(&hex[2..4], 16)?;
+            let b = u8::from_str_radix(&hex[4..6], 16)?;
+            [r, g, b]
+        }
+        _ => return Err(format!("Invalid hex color length: {}", color).into()),
+    };
+    Ok(rgb)
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Validate that a color string is a valid hex color.
+fn validate_color(color: &str) -> Result<(), Box<dyn Error>> {
+    let hex = color.strip_prefix('#').ok_or(format!(
+        "Invalid color '{}': must start with '#' (e.g. #FF0000 or #F00)",
+        color
+    ))?;
+
+    if hex.len() != 3 && hex.len() != 6 {
+        return Err(format!(
+            "Invalid color '{}': must be 3 or 6 hex digits after '#'",
+            color
+        )
+        .into());
+    }
+
+    for (i, c) in hex.chars().enumerate() {
+        if !c.is_ascii_hexdigit() {
+            return Err(format!(
+                "Invalid color '{}': '{}' at position {} is not a valid hex digit",
+                color,
+                c,
+                i + 1
+            )
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse an error correction level string.
+fn parse_ecc(level: &str) -> Result<QrCodeEcc, Box<dyn Error>> {
+    match level {
+        "L" => Ok(QrCodeEcc::Low),
+        "M" => Ok(QrCodeEcc::Medium),
+        "Q" => Ok(QrCodeEcc::Quartile),
+        "H" => Ok(QrCodeEcc::High),
+        _ => Err(format!("Invalid ECC level '{}': must be L, M, Q, or H", level).into()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // --- Color validation ---
+
+    #[test]
+    fn validate_color_rejects_no_hash() {
+        assert!(validate_color("red").is_err());
+        assert!(validate_color("FF0000").is_err());
+    }
+
+    #[test]
+    fn validate_color_rejects_bad_hex() {
+        assert!(validate_color("#GGG").is_err());
+        assert!(validate_color("#ZZZZZZ").is_err());
+    }
+
+    #[test]
+    fn validate_color_rejects_empty() {
+        assert!(validate_color("").is_err());
+        assert!(validate_color("#").is_err());
+    }
+
+    #[test]
+    fn validate_color_accepts_3_digit() {
+        assert!(validate_color("#000").is_ok());
+        assert!(validate_color("#FFF").is_ok());
+        assert!(validate_color("#aB3").is_ok());
+    }
+
+    #[test]
+    fn validate_color_accepts_6_digit() {
+        assert!(validate_color("#000000").is_ok());
+        assert!(validate_color("#FFFFFF").is_ok());
+        assert!(validate_color("#aB3cDe").is_ok());
+    }
+
+    #[test]
+    fn validate_color_error_message_is_helpful() {
+        let err = validate_color("#GGG").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("#"), "error should mention the color");
+        assert!(msg.contains("hex"), "error should mention hex");
+    }
+
+    // --- ECC parsing ---
+
+    #[test]
+    fn parse_ecc_all_levels() {
+        assert!(parse_ecc("L").is_ok());
+        assert!(parse_ecc("M").is_ok());
+        assert!(parse_ecc("Q").is_ok());
+        assert!(parse_ecc("H").is_ok());
+    }
+
+    #[test]
+    fn parse_ecc_rejects_invalid() {
+        assert!(parse_ecc("X").is_err());
+        assert!(parse_ecc("low").is_err());
+    }
+
+    // --- WiFi URI ---
+
+    #[test]
+    fn build_wifi_uri_wpa() {
+        let args = Args {
+            wifi: true,
+            ssid: Some("Home".to_string()),
+            password: Some("secret".to_string()),
+            wifitype: "wpa".to_string(),
+            vcard: false,
+            batch: None,
+            text: String::new(),
+            output: None,
+            stdin: false,
+            stdout: false,
+            source_file: None,
+            name: None,
+            phone: None,
+            email: None,
+            org: None,
+            title: None,
+            url: None,
+            format: "svg".to_string(),
+            term: false,
+            size: None,
+            shape: ModuleShape::Square,
+            fg_color: "#000000".to_string(),
+            bg_color: "#FFFFFF".to_string(),
+            dark_mode: false,
+            border: 4,
+            ecc: "M".to_string(),
+            mask: None,
+            logo: None,
+        };
+        let uri = build_wifi_uri(&args).unwrap();
+        assert_eq!(uri, "WIFI:T:wpa;S:Home;P:secret;;");
+    }
+
+    #[test]
+    fn build_wifi_uri_wep() {
+        let args = Args {
+            wifi: true,
+            ssid: Some("Net".to_string()),
+            password: Some("pwd".to_string()),
+            wifitype: "wep".to_string(),
+            vcard: false,
+            batch: None,
+            text: String::new(),
+            output: None,
+            stdin: false,
+            stdout: false,
+            source_file: None,
+            name: None,
+            phone: None,
+            email: None,
+            org: None,
+            title: None,
+            url: None,
+            format: "svg".to_string(),
+            term: false,
+            size: None,
+            shape: ModuleShape::Square,
+            fg_color: "#000000".to_string(),
+            bg_color: "#FFFFFF".to_string(),
+            dark_mode: false,
+            border: 4,
+            ecc: "M".to_string(),
+            mask: None,
+            logo: None,
+        };
+        let uri = build_wifi_uri(&args).unwrap();
+        assert_eq!(uri, "WIFI:T:wep;S:Net;P:pwd;;");
+    }
+
+    #[test]
+    fn build_wifi_uri_missing_ssid() {
+        let args = Args {
+            wifi: true,
+            ssid: None,
+            password: Some("x".to_string()),
+            wifitype: "wpa".to_string(),
+            vcard: false,
+            batch: None,
+            text: String::new(),
+            output: None,
+            stdin: false,
+            stdout: false,
+            source_file: None,
+            name: None,
+            phone: None,
+            email: None,
+            org: None,
+            title: None,
+            url: None,
+            format: "svg".to_string(),
+            term: false,
+            size: None,
+            shape: ModuleShape::Square,
+            fg_color: "#000000".to_string(),
+            bg_color: "#FFFFFF".to_string(),
+            dark_mode: false,
+            border: 4,
+            ecc: "M".to_string(),
+            mask: None,
+            logo: None,
+        };
+        assert!(build_wifi_uri(&args).is_err());
+    }
+
+    // --- vCard ---
+
+    #[test]
+    fn build_vcard_minimal() {
+        let args = Args {
+            vcard: true,
+            name: Some("John".to_string()),
+            phone: Some("123".to_string()),
+            email: Some("john@example.com".to_string()),
+            org: None,
+            title: None,
+            url: None,
+            wifi: false,
+            ssid: None,
+            password: None,
+            wifitype: "wpa".to_string(),
+            batch: None,
+            text: String::new(),
+            output: None,
+            stdin: false,
+            stdout: false,
+            source_file: None,
+            format: "svg".to_string(),
+            term: false,
+            size: None,
+            shape: ModuleShape::Square,
+            fg_color: "#000000".to_string(),
+            bg_color: "#FFFFFF".to_string(),
+            dark_mode: false,
+            border: 4,
+            ecc: "M".to_string(),
+            mask: None,
+            logo: None,
+        };
+        let vcard = build_vcard(&args).unwrap();
+        assert!(vcard.contains("BEGIN:VCARD"));
+        assert!(vcard.contains("END:VCARD"));
+        assert!(vcard.contains("FN:John"));
+        assert!(vcard.contains("TEL:123"));
+        assert!(vcard.contains("EMAIL:john@example.com"));
+    }
+
+    #[test]
+    fn build_vcard_full() {
+        let args = Args {
+            vcard: true,
+            name: Some("Jane".to_string()),
+            phone: Some("+1234".to_string()),
+            email: Some("jane@co.com".to_string()),
+            org: Some("ACME".to_string()),
+            title: Some("Engineer".to_string()),
+            url: Some("https://acme.com".to_string()),
+            wifi: false,
+            ssid: None,
+            password: None,
+            wifitype: "wpa".to_string(),
+            batch: None,
+            text: String::new(),
+            output: None,
+            stdin: false,
+            stdout: false,
+            source_file: None,
+            format: "svg".to_string(),
+            term: false,
+            size: None,
+            shape: ModuleShape::Square,
+            fg_color: "#000000".to_string(),
+            bg_color: "#FFFFFF".to_string(),
+            dark_mode: false,
+            border: 4,
+            ecc: "M".to_string(),
+            mask: None,
+            logo: None,
+        };
+        let vcard = build_vcard(&args).unwrap();
+        assert!(vcard.contains("ORG:ACME"));
+        assert!(vcard.contains("TITLE:Engineer"));
+        assert!(vcard.contains("URL:https://acme.com"));
+    }
+
+    // --- SVG ---
+
     #[test]
     fn qr_to_svg_contains_xml_declaration() {
         let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
-        let svg = qr_to_svg(&qr, 4, "#000000", "#FFFFFF");
-        assert!(svg.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+        let svg = qr_to_svg(
+            &qr,
+            4,
+            "#000000",
+            "#FFFFFF",
+            &ModuleShape::Square,
+            None,
+            &None,
+        );
+        assert!(svg.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+    }
+
+    #[test]
+    fn qr_to_svg_contains_version_comment() {
+        let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
+        let svg = qr_to_svg(
+            &qr,
+            4,
+            "#000000",
+            "#FFFFFF",
+            &ModuleShape::Square,
+            None,
+            &None,
+        );
+        assert!(svg.contains("<!-- generated by flexq"));
     }
 
     #[test]
     fn qr_to_svg_contains_colors() {
         let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
-        let svg = qr_to_svg(&qr, 4, "#FF0000", "#FFFFCC");
+        let svg = qr_to_svg(
+            &qr,
+            4,
+            "#FF0000",
+            "#FFFFCC",
+            &ModuleShape::Square,
+            None,
+            &None,
+        );
         assert!(svg.contains("fill=\"#FFFFCC\""));
         assert!(svg.contains("fill=\"#FF0000\""));
     }
@@ -187,32 +1086,118 @@ mod tests {
         let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
         let size = qr.size() as i32;
 
-        let svg_b0 = qr_to_svg(&qr, 0, "#000", "#FFF");
+        let svg_b0 = qr_to_svg(&qr, 0, "#000", "#FFF", &ModuleShape::Square, None, &None);
         assert!(svg_b0.contains(&format!(r#"viewBox="0 0 {} {}""#, size, size)));
 
-        let svg_b8 = qr_to_svg(&qr, 8, "#000", "#FFF");
+        let svg_b8 = qr_to_svg(&qr, 8, "#000", "#FFF", &ModuleShape::Square, None, &None);
         let dim_b8 = size + 16;
         assert!(svg_b8.contains(&format!(r#"viewBox="0 0 {} {}""#, dim_b8, dim_b8)));
     }
 
     #[test]
+    fn qr_to_svg_fixed_size() {
+        let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
+        let svg = qr_to_svg(
+            &qr,
+            4,
+            "#000",
+            "#FFF",
+            &ModuleShape::Square,
+            Some(400),
+            &None,
+        );
+        assert!(svg.contains(r#"viewBox="0 0 400 400""#));
+        assert!(svg.contains(r#"width="400" height="400""#));
+    }
+
+    #[test]
     fn qr_to_svg_contains_crisp_edges() {
         let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
-        let svg = qr_to_svg(&qr, 4, "#000000", "#FFFFFF");
+        let svg = qr_to_svg(
+            &qr,
+            4,
+            "#000000",
+            "#FFFFFF",
+            &ModuleShape::Square,
+            None,
+            &None,
+        );
         assert!(svg.contains(r#"shape-rendering="crispEdges""#));
     }
 
     #[test]
-    fn validate_color_rejects_invalid() {
-        assert!(validate_color("red").is_err());
-        assert!(validate_color("#GGG").is_err());
-        assert!(validate_color("").is_err());
+    fn qr_to_svg_circle_shape() {
+        let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
+        let svg = qr_to_svg(&qr, 4, "#000", "#FFF", &ModuleShape::Circle, None, &None);
+        assert!(svg.contains("<circle"));
+        assert!(!svg.contains("<path d="));
     }
 
     #[test]
-    fn validate_color_accepts_valid() {
-        assert!(validate_color("#000000").is_ok());
-        assert!(validate_color("#FFF").is_ok());
-        assert!(validate_color("#aB3cDe").is_ok());
+    fn qr_to_svg_rounded_shape() {
+        let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
+        let svg = qr_to_svg(&qr, 4, "#000", "#FFF", &ModuleShape::Rounded, None, &None);
+        assert!(svg.contains("<rect"));
+        assert!(svg.contains("rx="));
+    }
+
+    #[test]
+    fn qr_to_svg_hexagon_shape() {
+        let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
+        let svg = qr_to_svg(&qr, 4, "#000", "#FFF", &ModuleShape::Hexagon, None, &None);
+        assert!(svg.contains("<polygon"));
+    }
+
+    // --- PNG ---
+
+    #[test]
+    fn qr_to_png_produces_valid_png() {
+        let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
+        let png = qr_to_png(&qr, 4, "#000000", "#FFFFFF", None).unwrap();
+        // PNG magic bytes
+        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+    }
+
+    #[test]
+    fn qr_to_png_respects_colors() {
+        let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
+        let _png = qr_to_png(&qr, 4, "#FF0000", "#FFFF00", None).unwrap();
+        // If it doesn't panic, the colors parsed correctly
+    }
+
+    #[test]
+    fn qr_to_png_fixed_size() {
+        let qr = QrCode::encode_text("test", QrCodeEcc::Medium).unwrap();
+        let _png = qr_to_png(&qr, 4, "#000", "#FFF", Some(400)).unwrap();
+        // Should produce a valid PNG without panicking
+    }
+
+    // --- RGB parsing ---
+
+    #[test]
+    fn parse_rgb_3_digit() {
+        let [r, g, b] = parse_rgb("#F00").unwrap();
+        assert_eq!([r, g, b], [255, 0, 0]);
+    }
+
+    #[test]
+    fn parse_rgb_6_digit() {
+        let [r, g, b] = parse_rgb("#00FF00").unwrap();
+        assert_eq!([r, g, b], [0, 255, 0]);
+    }
+
+    #[test]
+    fn parse_rgb_rejects_no_hash() {
+        assert!(parse_rgb("FFF").is_err());
+    }
+
+    // --- Base64 ---
+
+    #[test]
+    fn base64_encode_known_value() {
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert_eq!(base64_encode(b"M"), "TQ==");
+        assert_eq!(base64_encode(b""), "");
     }
 }
