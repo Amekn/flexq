@@ -7,8 +7,11 @@
 //! # Usage
 //!
 //! ```text
-//! flexq "<text>" <output.svg> [OPTIONS]
+//! flexq [TEXT] [OUTPUT] [OPTIONS]
 //! ```
+//!
+//! Both `TEXT` and `OUTPUT` are optional — use `--stdin` or `--source-file` for
+//! input, and `--stdout` for output.
 //!
 //! # Examples
 //!
@@ -17,13 +20,18 @@
 //! flexq "Hello, world!" hello.svg
 //! flexq "https://example.com" qrcode.svg --border 8
 //! flexq "https://example.com" qrcode.svg --fg-color "#FF0000" --bg-color "#FFFFCC"
+//! echo "https://example.com" | flexq --stdin --stdout > qrcode.svg
+//! flexq --source-file input.txt output.svg
 //! ```
 //!
 //! # Options
 //!
-//! * `-b`, `--border` — Border size in QR modules (default: `4`).
-//! * `-F`, `--fg-color` — Foreground color of the QR code (default: `#000000`).
-//! * `-B`, `--bg-color` — Background color of the QR code (default: `#FFFFFF`).
+//! * `-i`, `--stdin` — Read the text to encode from standard input.
+//! * `-o`, `--stdout` — Write the SVG QR code to standard output.
+//! * `-s`, `--source-file <F>` — Read the text to encode from a file.
+//! * `-b`, `--border <N>` — Border size in QR modules (default: `4`).
+//! * `-F`, `--fg-color <C>` — Foreground color of the QR code (default: `#000000`).
+//! * `-B`, `--bg-color <C>` — Background color of the QR code (default: `#FFFFFF`).
 //! * `-h`, `--help` — Print help message and exit.
 //! * `-V`, `--version` — Print version information and exit.
 //!
@@ -31,8 +39,8 @@
 //!
 //! FlexQ generates SVG files using medium error correction (`QrCodeEcc::Medium`)
 //! and a configurable border (default: 4 modules), foreground color (default: black),
-//! and background color (default: white). The output SVG is standalone and can be
-//! opened in any browser or vector graphics editor.
+//! and background color (default: white). Colors are validated as hex strings.
+//! The output SVG is standalone and can be opened in any browser or vector graphics editor.
 
 use clap::{ArgAction, Parser};
 use qrcodegen::{QrCode, QrCodeEcc};

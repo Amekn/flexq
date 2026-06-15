@@ -6,9 +6,11 @@ A minimal command-line QR code generator written in Rust. Encodes arbitrary text
 
 - **Lightweight** — single binary with minimal dependencies
 - **SVG output** — resolution-independent, opens in any browser or vector editor
+- **Flexible input** — encode from argument, stdin, or file
+- **Flexible output** — save to file or pipe to stdout
+- **Color validation** — rejects invalid hex colors upfront
 - **Medium error correction** — QR codes remain scannable even if partially damaged
 - **Customizable** — configurable border size, foreground color, and background color
-- **Simple interface** — two arguments and you're done
 
 ## Installation
 
@@ -31,21 +33,28 @@ cargo install flexq
 ## Usage
 
 ```
-flexq <text> <output.svg> [OPTIONS]
+flexq [TEXT] [OUTPUT] [OPTIONS]
 ```
 
-| Argument     | Description                                      |
-|-------------|--------------------------------------------------|
-| `<text>`    | The text or URL to encode into a QR code.        |
-| `<output.svg>` | The file path where the SVG will be saved.  |
+Both `TEXT` and `OUTPUT` are optional — use `--stdin` or `--source-file` for input, and `--stdout` for output.
+
+### Arguments
+
+| Argument   | Description                                      |
+|------------|--------------------------------------------------|
+| `[TEXT]`   | The text or URL to encode into a QR code. |
+| `[OUTPUT]` | The file path where the SVG will be saved. |
 
 ### Options
 
 | Option             | Short  | Default    | Description                                          |
 |--------------------|--------|------------|------------------------------------------------------|
+| `--stdin`          | `-i`   | —          | Read the text to encode from standard input.         |
+| `--stdout`         | `-o`   | —          | Write the SVG QR code to standard output.            |
+| `--source-file <F>`| `-s`   | —          | Read the text to encode from a file.                 |
 | `--border <N>`     | `-b`   | `4`        | Border size in QR modules around the code.           |
-| `--fg-color <C>`   | `-F`   | `#000000`  | Foreground (module) color of the QR code.            |
-| `--bg-color <C>`   | `-B`   | `#FFFFFF`  | Background color of the QR code.                     |
+| `--fg-color <C>`   | `-F`   | `#000000`  | Foreground (module) color of the QR code (hex).      |
+| `--bg-color <C>`   | `-B`   | `#FFFFFF`  | Background color of the QR code (hex).               |
 
 ### Examples
 
@@ -61,6 +70,18 @@ Generate a QR code for plain text:
 flexq "Hello, world!" hello.svg
 ```
 
+Read from stdin and write to stdout (pipe-friendly):
+
+```bash
+echo "https://example.com" | flexq --stdin --stdout > qrcode.svg
+```
+
+Read from a file:
+
+```bash
+flexq --source-file input.txt output.svg
+```
+
 Generate with a larger border:
 
 ```bash
@@ -71,6 +92,12 @@ Generate with custom colors:
 
 ```bash
 flexq "https://example.com" qrcode.svg --fg-color "#FF0000" --bg-color "#FFFFCC"
+```
+
+Pipe the result directly to another tool:
+
+```bash
+flexq "https://example.com" --stdout | xdg-open -
 ```
 
 ### Help
