@@ -1,4 +1,4 @@
-# FlexQ
+# flexq
 
 A flexible command-line QR code generator written in Rust. Encodes arbitrary text, URLs, WiFi credentials, or vCard contacts into standalone SVG or PNG files.
 
